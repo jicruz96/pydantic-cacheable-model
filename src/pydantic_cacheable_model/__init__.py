@@ -17,7 +17,12 @@ import warnings
 from datetime import datetime
 from enum import Enum
 from glob import glob
-from typing import Annotated, Any, ClassVar, Literal, Self, TypeVar, overload
+from typing import Annotated, Any, ClassVar, Literal, TypeVar, overload
+
+try:
+    from typing import Self
+except ImportError:
+    from typing_extensions import Self
 
 from pydantic import BaseModel, ValidationError
 
@@ -50,6 +55,7 @@ class CacheableModel(BaseModel):
       name is derived from the class: the optional `Model` suffix is removed and
       CamelCase is converted to kebab-case (e.g., `UserModel` → `user`).
     """
+
     CACHE_ROOT: ClassVar[str] = ".cache"
     CACHE_DIRNAME: ClassVar[str | None] = None
 

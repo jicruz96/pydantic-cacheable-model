@@ -10,7 +10,7 @@ Small helpers to make your **Pydantic v2** models trivially cacheable to disk.
 pip install pydantic-cacheable-model
 ```
 
-Supports Python **3.11+**
+Supports Python **3.10+**
 
 ---
 
