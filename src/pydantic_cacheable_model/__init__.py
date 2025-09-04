@@ -1,3 +1,12 @@
+"""Utilities to make Pydantic v2 models cacheable to disk.
+
+Public API:
+- `CacheableModel`: Base class providing disk-backed JSON cache helpers.
+- `CacheId[T]`: Marker for a single field to be used as the cache identifier.
+
+See the project README for usage examples and configuration options.
+"""
+
 from __future__ import annotations
 
 import hashlib
@@ -33,11 +42,29 @@ def _json_default(o: Any):
 
 
 class CacheableModel(BaseModel):
+    """Base model that can cache itself to disk as JSON.
+
+    Configuration:
+    - `CACHE_ROOT`: Root directory for all caches (default: `.cache`).
+    - `CACHE_DIRNAME`: Optional subdirectory name for this model. If `None`, a
+      name is derived from the class: the optional `Model` suffix is removed and
+      CamelCase is converted to kebab-case (e.g., `UserModel` → `user`).
+    """
     CACHE_ROOT: ClassVar[str] = ".cache"
     CACHE_DIRNAME: ClassVar[str | None] = None
 
     @property
     def cache_id(self) -> str:
+        """Return the identifier string used to cache this instance.
+
+        The default implementation discovers exactly one field annotated with
+        `CacheId[...]` and returns its value as a string. Subclasses may
+        override this property to implement custom logic.
+
+        Raises:
+            NotImplementedError: If no `CacheId` field is defined.
+            ValueError: If multiple `CacheId` fields exist or the value is `None`.
+        """
         cache_id_fields: list[str] = []
         for name, field in type(self).model_fields.items():
             try:
@@ -61,6 +88,7 @@ class CacheableModel(BaseModel):
 
     @classmethod
     def cache_dir_path(cls) -> str:
+        """Return the directory path where this model stores its cache files."""
         model_dir = (
             cls.CACHE_DIRNAME
             or re.sub(
@@ -71,11 +99,17 @@ class CacheableModel(BaseModel):
 
     @classmethod
     def cache_id_to_filename(cls, *, cache_id: str) -> str:
+        """Map a cache identifier to a filename.
+
+        By default this returns `<sha256(cache_id)>.json` to ensure safe and
+        stable filenames regardless of the content of `cache_id`.
+        """
         digest = hashlib.sha256(cache_id.encode("utf-8")).hexdigest()
         return f"{digest}.json"
 
     @classmethod
     def get_cache_path(cls, *, cache_id: str) -> str:
+        """Return the absolute path for the JSON cache file of `cache_id`."""
         return os.path.join(
             cls.cache_dir_path(), cls.cache_id_to_filename(cache_id=cache_id)
         )
@@ -108,6 +142,26 @@ class CacheableModel(BaseModel):
         not_found_ok: bool = False,
         warn_mismatch: bool = True,
     ) -> Self | None:
+        """Load an instance from cache.
+
+        Args:
+            cache_id: Identifier for the instance to load.
+            not_found_ok: If True, return `None` when the cache file is missing
+                (instead of raising ``FileNotFoundError``). When True, this also
+                causes validation failures to return `None` (optionally with a
+                warning).
+            warn_mismatch: If True and `not_found_ok=True`, emit a warning when
+                a cached payload fails validation against the current model.
+
+        Returns:
+            An instance of the model, or `None` when `not_found_ok=True` and the
+            file is missing or fails validation.
+
+        Raises:
+            FileNotFoundError: If the cache file is missing and `not_found_ok` is False.
+            ValidationError: If the cached data fails model validation and
+                `not_found_ok` is False.
+        """
         path = cls.get_cache_path(cache_id=cache_id)
         if not os.path.exists(path):
             if not_found_ok:
@@ -133,6 +187,15 @@ class CacheableModel(BaseModel):
 
     @classmethod
     def load_all_cached(cls) -> list[Self]:
+        """Load all cached instances for this model.
+
+        Returns:
+            A list of model instances loaded from all `*.json` files in the
+            model's cache directory.
+
+        Raises:
+            ValidationError: If any cached JSON payload fails validation.
+        """
         dirname = cls.cache_dir_path()
         if not os.path.isdir(dirname):
             return []
@@ -144,9 +207,16 @@ class CacheableModel(BaseModel):
 
     @property
     def cache_path(self) -> str:
+        """Return the absolute filesystem path where this instance is cached."""
         return self.get_cache_path(cache_id=self.cache_id)
 
     def cache(self) -> None:
+        """Write this instance to its JSON cache file.
+
+        Ensures the target directory exists, then writes the result of
+        `self.model_dump(mode="json")` to disk with an additional JSON
+        encoder that supports `Enum` and `datetime` values.
+        """
         os.makedirs(self.cache_dir_path(), exist_ok=True)
         with open(self.cache_path, "w") as fp:
             json.dump(
