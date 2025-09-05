@@ -2,7 +2,7 @@
 
 Public API:
 - `CacheableModel`: Base class providing disk-backed JSON cache helpers.
-- `CacheId[T]`: Marker for a single field to be used as the cache identifier.
+- `CacheKey[T]`: Marker for a single field to be used as the cache key.
 
 See the project README for usage examples and configuration options.
 """
@@ -29,13 +29,18 @@ from pydantic import BaseModel, ValidationError
 T = TypeVar("T")
 
 
-class _CacheIdMarker:
+class CacheKeyComputationError(Exception):
     pass
 
 
-CacheId = Annotated[T, _CacheIdMarker()]
+class _CacheKeyMarker:
+    pass
 
-__all__ = ["CacheableModel", "CacheId"]
+
+CacheKey = Annotated[T, _CacheKeyMarker()]
+
+
+__all__ = ["CacheableModel", "CacheKey", "CacheKeyComputationError"]
 
 
 def _json_default(o: Any):
@@ -60,36 +65,40 @@ class CacheableModel(BaseModel):
     CACHE_DIRNAME: ClassVar[str | None] = None
 
     @property
-    def cache_id(self) -> str:
-        """Return the identifier string used to cache this instance.
+    def cache_key(self) -> str:
+        """Return the key string used to cache this instance.
 
         The default implementation discovers exactly one field annotated with
-        `CacheId[...]` and returns its value as a string. Subclasses may
+        `CacheKey[...]` and returns its value as a string. Subclasses may
         override this property to implement custom logic.
 
         Raises:
-            NotImplementedError: If no `CacheId` field is defined.
-            ValueError: If multiple `CacheId` fields exist or the value is `None`.
+            CacheKeyComputationError:
+                * If no `CacheKey` field is defined.
+                * If multiple `CacheKey` fields exist
+                * If CacheKey value is `None`.
         """
-        cache_id_fields: list[str] = []
+        cache_key_fields: list[str] = []
         for name, field in type(self).model_fields.items():
             try:
                 metadata = getattr(field, "metadata", ())
             except Exception:
                 metadata = ()
-            if any(isinstance(m, _CacheIdMarker) for m in metadata):
-                cache_id_fields.append(name)
+            if any(isinstance(m, _CacheKeyMarker) for m in metadata):
+                cache_key_fields.append(name)
 
-        if not cache_id_fields:
-            raise NotImplementedError
-        if len(cache_id_fields) > 1:
-            raise ValueError(
-                f"Multiple CacheId fields defined: {', '.join(cache_id_fields)}"
+        if not cache_key_fields:
+            raise CacheKeyComputationError(f"{type(self.__name__)}: Missing CacheKey")
+        if len(cache_key_fields) > 1:
+            raise CacheKeyComputationError(
+                f"{type(self.__name__)}: Multiple CacheKey fields defined: {', '.join(cache_key_fields)}"
             )
 
-        value = getattr(self, cache_id_fields[0])
+        value = getattr(self, cache_key_fields[0])
         if value is None:
-            raise ValueError(f"CacheId field '{cache_id_fields[0]}' is None")
+            raise CacheKeyComputationError(
+                f"{type(self.__name__)}: CacheKey field '{cache_key_fields[0]}' is None"
+            )
         return value if isinstance(value, str) else str(value)
 
     @classmethod
@@ -104,20 +113,20 @@ class CacheableModel(BaseModel):
         return os.path.join(cls.CACHE_ROOT, model_dir)
 
     @classmethod
-    def cache_id_to_filename(cls, *, cache_id: str) -> str:
-        """Map a cache identifier to a filename.
+    def cache_key_to_filename(cls, *, cache_key: str) -> str:
+        """Map a cache key to a filename.
 
-        By default this returns `<sha256(cache_id)>.json` to ensure safe and
-        stable filenames regardless of the content of `cache_id`.
+        By default this returns `<sha256(cache_key)>.json` to ensure safe and
+        stable filenames regardless of the content of `cache_key`.
         """
-        digest = hashlib.sha256(cache_id.encode("utf-8")).hexdigest()
+        digest = hashlib.sha256(cache_key.encode("utf-8")).hexdigest()
         return f"{digest}.json"
 
     @classmethod
-    def get_cache_path(cls, *, cache_id: str) -> str:
-        """Return the absolute path for the JSON cache file of `cache_id`."""
+    def get_cache_path(cls, *, cache_key: str) -> str:
+        """Return the absolute path for the JSON cache file of `cache_key`."""
         return os.path.join(
-            cls.cache_dir_path(), cls.cache_id_to_filename(cache_id=cache_id)
+            cls.cache_dir_path(), cls.cache_key_to_filename(cache_key=cache_key)
         )
 
     @overload
@@ -125,7 +134,7 @@ class CacheableModel(BaseModel):
     def load(
         cls,
         *,
-        cache_id: str,
+        cache_key: str,
         not_found_ok: Literal[False] = ...,
         warn_mismatch: bool = ...,
     ) -> Self: ...
@@ -135,7 +144,7 @@ class CacheableModel(BaseModel):
     def load(
         cls,
         *,
-        cache_id: str,
+        cache_key: str,
         not_found_ok: Literal[True],
         warn_mismatch: bool = ...,
     ) -> Self | None: ...
@@ -144,14 +153,14 @@ class CacheableModel(BaseModel):
     def load(
         cls,
         *,
-        cache_id: str,
+        cache_key: str,
         not_found_ok: bool = False,
         warn_mismatch: bool = True,
     ) -> Self | None:
         """Load an instance from cache.
 
         Args:
-            cache_id: Identifier for the instance to load.
+            cache_key: Key for the instance to load.
             not_found_ok: If True, return `None` when the cache file is missing
                 (instead of raising ``FileNotFoundError``). When True, this also
                 causes validation failures to return `None` (optionally with a
@@ -168,12 +177,12 @@ class CacheableModel(BaseModel):
             ValidationError: If the cached data fails model validation and
                 `not_found_ok` is False.
         """
-        path = cls.get_cache_path(cache_id=cache_id)
+        path = cls.get_cache_path(cache_key=cache_key)
         if not os.path.exists(path):
             if not_found_ok:
                 return None
             raise FileNotFoundError(
-                f"Cache not found for {cls.__name__}({cache_id}) at {path}"
+                f"Cache not found for {cls.__name__}({cache_key}) at {path}"
             )
 
         with open(path, "r") as fp:
@@ -184,7 +193,7 @@ class CacheableModel(BaseModel):
             if not_found_ok:
                 if warn_mismatch:
                     warnings.warn(
-                        f"Could not load cached {cls.__name__}({cache_id}) at {path}: {e}",
+                        f"Could not load cached {cls.__name__}({cache_key}) at {path}: {e}",
                         category=UserWarning,
                         stacklevel=2,
                     )
@@ -214,7 +223,7 @@ class CacheableModel(BaseModel):
     @property
     def cache_path(self) -> str:
         """Return the absolute filesystem path where this instance is cached."""
-        return self.get_cache_path(cache_id=self.cache_id)
+        return self.get_cache_path(cache_key=self.cache_key)
 
     def cache(self) -> None:
         """Write this instance to its JSON cache file.
