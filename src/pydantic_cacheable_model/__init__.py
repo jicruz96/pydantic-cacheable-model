@@ -13,15 +13,16 @@ import hashlib
 import json
 import os
 import re
+import sys
 import warnings
 from datetime import datetime
 from enum import Enum
 from glob import glob
 from typing import Annotated, Any, ClassVar, Literal, TypeVar, overload
 
-try:
+if sys.version_info > (3, 11):
     from typing import Self
-except ImportError:
+else:
     from typing_extensions import Self
 
 from pydantic import BaseModel, ValidationError
